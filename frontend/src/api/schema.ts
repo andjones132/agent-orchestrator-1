@@ -6594,6 +6594,7 @@ export interface components {
             userRequest: string;
         };
         SessionImportCandidate: {
+            folder?: string;
             harness: string;
             id: string;
             /** Format: date-time */
