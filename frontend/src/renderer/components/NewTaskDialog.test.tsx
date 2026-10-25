@@ -31,6 +31,7 @@ vi.mock("../hooks/useWorkspaceQuery", async (importOriginal) => {
 				{ id: "proj-2", name: "agent-orchestrator", kind: "local", workspaceRepos: [
 					{ name: "app", relativePath: "app", repo: "https://github.com/aoagents/agent-orchestrator.git" },
 				] },
+				{ id: "cloud-1", name: "cloud-app", kind: "cloud" },
 				{ id: "__standalone__", name: "Scratchpad", kind: "standalone" },
 			],
 		}),
@@ -208,6 +209,7 @@ describe("NewTaskDialog", () => {
 			"Scratchpad",
 			"careerops",
 			"agent-orchestrator",
+			"cloud-app",
 		]);
 		await waitFor(() => expect(options[1]?.querySelectorAll("img")).toHaveLength(2));
 		expect(options[1]?.querySelectorAll("img")).toHaveLength(2);
@@ -536,4 +538,12 @@ it.each([undefined, "Read the report context."])("keeps the typed prompt while S
  expect(onContentChange).toHaveBeenLastCalledWith(true);
  act(() => useUiStore.getState().closeSettings());
  expect(await screen.findByLabelText("Task")).toHaveValue("keep my observation");
+});
+
+it("offers only projects on this machine for a report task", async () => {
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+	render(<QueryClientProvider client={client}><NewTaskDialog open hiddenPrompt="Read the report context." onCreated={vi.fn()} onOpenChange={vi.fn()} /></QueryClientProvider>);
+	await userEvent.setup().click(screen.getByRole("button", { name: "Project" }));
+	const options = await screen.findAllByRole("menuitem");
+	expect(options.map((option) => option.querySelector(".text-settings-label")?.textContent?.trim())).toEqual(["Scratchpad", "careerops", "agent-orchestrator"]);
 });

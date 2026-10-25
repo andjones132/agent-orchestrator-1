@@ -117,9 +117,11 @@ export function NewTaskDialog({ open, projectId, hostId, hiddenPrompt, displayNa
 	const selectedProject = projects.find((project) => project.id === selectedProjectId);
 	const selectedProjectName = selectedProject?.name ?? t("standalone.workspaceName");
 	const selectedProjectAvatar = projectAvatars.get(selectedProjectId)?.[0];
+	// A report task reads files this machine just wrote, so it must run here.
+	const pickableProjects = hiddenPrompt ? localProjects : projects;
 	const projectOptions = [
 		{ value: STANDALONE_WORKSPACE_ID, label: t("standalone.workspaceName") },
-		...projects.map((project) => ({ value: project.id, label: project.name })),
+		...pickableProjects.map((project) => ({ value: project.id, label: project.name })),
 	];
 	useEffect(() => {
 		if (!open) return;
