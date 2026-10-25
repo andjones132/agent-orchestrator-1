@@ -159,6 +159,7 @@ export const ChatMarkdown = memo(function ChatMarkdown({
 	muted = false,
 	className,
 	safeOrigin = false,
+	remarkPlugins,
 }: {
 	text: string;
 	streaming?: boolean;
@@ -170,7 +171,10 @@ export const ChatMarkdown = memo(function ChatMarkdown({
 	muted?: boolean;
 	className?: string;
 	safeOrigin?: boolean;
+	/** Run after the built-in plugins; keep the array stable, a new one re-parses the text. */
+	remarkPlugins?: Options["remarkPlugins"];
 }) {
+	const plugins = useMemo(() => (remarkPlugins ? [...PLUGINS, ...remarkPlugins] : PLUGINS), [remarkPlugins]);
 	// Replies opened from history mount settled and never wrap; live ones keep the fade a
 	// beat past the end of the stream.
 	const [fading, setFading] = useState(streaming);
@@ -198,7 +202,7 @@ export const ChatMarkdown = memo(function ChatMarkdown({
 				)}
 			>
 				<Markdown
-					remarkPlugins={PLUGINS}
+					remarkPlugins={plugins}
 					rehypePlugins={fading && !prefersReducedMotion() ? streamingRehype : undefined}
 					components={COMPONENTS}
 					urlTransform={chatUrlTransform}
