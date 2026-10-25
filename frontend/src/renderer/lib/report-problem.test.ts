@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { collectReportProblemDiagnostics, reportProblemDestinationUrl, sanitizeReportText, type ReportProblemDiagnostics } from "./report-problem";
+import { collectReportProblemDiagnostics, formatReportTimestamp, reportProblemDestinationUrl, sanitizeReportText, type ReportProblemDiagnostics } from "./report-problem";
 
 const diagnostics: ReportProblemDiagnostics = {
 	appVersion: "1.2.3-test", buildMode: "dev", daemonState: "ready",
@@ -40,6 +40,14 @@ describe("GitHub report fallback", () => {
 		[`github_pat_${"a".repeat(30)}`, `github_pat_${"a".repeat(30)}`],
 	])("redacts %s", (input, privateText) => {
 		expect(sanitizeReportText(input)).not.toContain(privateText);
+	});
+
+	it("shows the generated time as readable local time with a UTC reference", () => {
+		expect(formatReportTimestamp("2026-10-21T20:50:24.025Z", "America/Los_Angeles")).toBe(
+			"Oct 21, 2026, 1:50:24 PM PDT (2026-10-21 20:50:24 UTC)",
+		);
+		expect(formatReportTimestamp("unknown")).toBe("unknown");
+		expect(new URL(reportProblemDestinationUrl(diagnostics)).searchParams.get("body")).toContain("(2026-07-02 00:00:00 UTC)");
 	});
 
 	it("derives route surface from the hash-history route", async () => {

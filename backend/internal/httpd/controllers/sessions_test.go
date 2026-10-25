@@ -44,6 +44,10 @@ import (
 )
 
 type fakeSessionService struct {
+	// lastListFilter is the filter the controller parsed; listPage, when set,
+	// replaces the page built from sessions so a test can pin the wire shape.
+	lastListFilter             sessionsvc.ListFilter
+	listPage                   *sessionsvc.ListPage
 	workspaceSnapshotInput     sessionsvc.WorkspaceSelectionRevisionInput
 	workspaceSnapshotFilter    string
 	cleanupPending             bool
@@ -107,12 +111,6 @@ type fakeSessionService struct {
 	staged                     []ports.SpawnAttachment
 	stagedPaths                []string
 	stageErr                   error
-	agentSwitches              map[domain.AgentSwitchID]domain.AgentSwitch
-	switchConfig               sessionsvc.SwitchAgentInput
-	switchErr                  error
-	recoveredSwitch            domain.AgentSwitchID
-	handoff                    json.RawMessage
-	handoffSource              domain.AgentGenerationID
 	autoInjectCISession        domain.SessionID
 	autoInjectCIEnabled        bool
 }
@@ -248,8 +246,7 @@ func newFakeSessionService() *fakeSessionService {
 	now := time.Now().UTC()
 	s := domain.Session{SessionRecord: domain.SessionRecord{ID: "ao-1", ProjectID: "ao", Kind: domain.KindWorker, Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}, AutoInjectReview: true, AutoInjectCI: true, CreatedAt: now, UpdatedAt: now}, Status: domain.StatusIdle, TerminalHandleID: "ao-1/terminal_0"}
 	return &fakeSessionService{
-		sessions:      map[domain.SessionID]domain.Session{s.ID: s},
-		agentSwitches: map[domain.AgentSwitchID]domain.AgentSwitch{},
+		sessions: map[domain.SessionID]domain.Session{s.ID: s},
 	}
 }
 
@@ -268,6 +265,15 @@ func (f *fakeSessionService) List(_ context.Context, filter sessionsvc.ListFilte
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+func (f *fakeSessionService) ListPage(ctx context.Context, filter sessionsvc.ListFilter) (sessionsvc.ListPage, error) {
+	f.lastListFilter = filter
+	if f.listPage != nil {
+		return *f.listPage, nil
+	}
+	sessions, err := f.List(ctx, filter)
+	return sessionsvc.ListPage{Sessions: sessions}, err
 }
 
 func (f *fakeSessionService) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error) {
@@ -424,79 +430,6 @@ func (f *fakeSessionService) ResumeAgent(_ context.Context, id domain.SessionID)
 	s.Status = domain.StatusIdle
 	f.sessions[id] = s
 	return sessionsvc.ResumeAgentOutcome{Session: s, Mode: sessionsvc.RestoreModeViewNative}, nil
-}
-
-func (f *fakeSessionService) SwitchAgent(_ context.Context, id domain.SessionID, cfg sessionsvc.SwitchAgentInput) (domain.AgentSwitch, error) {
-	if f.switchErr != nil {
-		return domain.AgentSwitch{}, f.switchErr
-	}
-	if _, ok := f.sessions[id]; !ok {
-		return domain.AgentSwitch{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
-	}
-	f.switchConfig = cfg
-	now := time.Now().UTC()
-	targetRef := domain.AgentNativeSessionID("native-target")
-	record := domain.AgentSwitch{
-		ID: "switch-1", SessionID: id, IdempotencyKey: "private-retry-key", RequestFingerprint: "v1:private-fingerprint",
-		FromHarness: domain.HarnessClaudeCode, TargetHarness: cfg.TargetHarness,
-		TargetNativeSessionRef: &targetRef,
-		TargetStartMode:        domain.AgentSwitchTargetStartFresh, State: domain.AgentSwitchPreparingHandoff,
-		AgentHandoffStatus:      domain.AgentHandoffReceived,
-		SemanticHandoffIncluded: true,
-		AgentHandoffPath:        "/private/ao/handoff.json", AgentHandoffHash: "private-hash",
-		FinalHandoffPath: "/private/ao/handoff.json", FinalHandoffHash: "private-hash",
-		SourceGenerationID: "private-source-generation", TargetGenerationID: "private-target-generation",
-		TargetRuntimeHandleID:  "private-target-runtime-handle",
-		TargetAcknowledgedAt:   &now,
-		ErrorCode:              domain.AgentSwitchErrorTargetStartUnconfirmed,
-		SourceTranscriptStatus: domain.AgentSwitchSourceTranscriptUnavailable,
-		RequestedAt:            now, UpdatedAt: now,
-	}
-	f.agentSwitches[record.ID] = record
-	return record, nil
-}
-
-func (f *fakeSessionService) ListAgentSwitches(_ context.Context, id domain.SessionID) ([]domain.AgentSwitch, error) {
-	if _, ok := f.sessions[id]; !ok {
-		return nil, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
-	}
-	out := make([]domain.AgentSwitch, 0, len(f.agentSwitches))
-	for _, record := range f.agentSwitches {
-		if record.SessionID == id {
-			out = append(out, record)
-		}
-	}
-	return out, nil
-}
-
-func (f *fakeSessionService) RecoverAgentSwitch(_ context.Context, id domain.SessionID, switchID domain.AgentSwitchID) (domain.AgentSwitch, error) {
-	record, ok := f.agentSwitches[switchID]
-	if !ok || record.SessionID != id {
-		return domain.AgentSwitch{}, apierr.NotFound("AGENT_SWITCH_NOT_FOUND", "Unknown agent switch")
-	}
-	f.recoveredSwitch = switchID
-	return record, nil
-}
-
-func (f *fakeSessionService) SubmitAgentHandoff(
-	_ context.Context,
-	id domain.SessionID,
-	switchID domain.AgentSwitchID,
-	sourceGenerationID domain.AgentGenerationID,
-	handoff json.RawMessage,
-) (domain.AgentSwitch, error) {
-	record, ok := f.agentSwitches[switchID]
-	if !ok || record.SessionID != id {
-		return domain.AgentSwitch{}, apierr.NotFound("AGENT_SWITCH_NOT_FOUND", "Unknown agent switch")
-	}
-	f.handoffSource = sourceGenerationID
-	f.handoff = append(json.RawMessage(nil), handoff...)
-	record.SourceGenerationID = sourceGenerationID
-	record.AgentHandoffStatus = domain.AgentHandoffReceived
-	record.AgentHandoffPath = "/private/ao/agent-handoff.json"
-	record.AgentHandoffHash = "private-hash"
-	f.agentSwitches[switchID] = record
-	return record, nil
 }
 
 func (f *fakeSessionService) Kill(_ context.Context, id domain.SessionID) (bool, error) {
@@ -977,202 +910,6 @@ func TestSessionsAPI_ListWorkspaceTree(t *testing.T) {
 	}
 }
 
-func TestSessionsAPI_AgentSwitchLifecycle(t *testing.T) {
-	svc := newFakeSessionService()
-	srv := newSessionTestServer(t, svc)
-
-	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/switch-agent", `{
-		"targetHarness":"codex",
-		"model":" gpt-\u0000-5.4 ",
-		"idempotencyKey":"retry-1"
-	}`)
-	if status != http.StatusAccepted {
-		t.Fatalf("switch agent = %d, want 202; body=%s", status, body)
-	}
-	assertAgentSwitchResponseRedacted(t, body)
-	var switched controllers.AgentSwitchResponse
-	mustJSON(t, body, &switched)
-	if switched.Switch.ID != "switch-1" || switched.Switch.TargetHarness != domain.HarnessCodex {
-		t.Fatalf("switch response = %+v", switched.Switch)
-	}
-	if switched.Switch.ErrorCode != domain.AgentSwitchErrorTargetStartUnconfirmed {
-		t.Fatalf("safe error code = %q", switched.Switch.ErrorCode)
-	}
-	if switched.Switch.SourceTranscriptStatus != domain.AgentSwitchSourceTranscriptUnavailable {
-		t.Fatalf("source transcript status = %q", switched.Switch.SourceTranscriptStatus)
-	}
-	if !switched.Switch.SemanticHandoffIncluded {
-		t.Fatal("semantic handoff inclusion fact was not projected")
-	}
-	if svc.switchConfig.Model != "gpt--5.4" || svc.switchConfig.IdempotencyKey != "retry-1" {
-		t.Fatalf("switch config = %+v", svc.switchConfig)
-	}
-
-	body, status, _ = doRequest(t, srv, http.MethodGet, "/api/v1/sessions/ao-1/agent-switches", "")
-	if status != http.StatusOK {
-		t.Fatalf("list switches = %d, want 200; body=%s", status, body)
-	}
-	assertAgentSwitchResponseRedacted(t, body)
-	var listed controllers.ListAgentSwitchesResponse
-	mustJSON(t, body, &listed)
-	if len(listed.Switches) != 1 || listed.Switches[0].ID != "switch-1" {
-		t.Fatalf("listed switches = %+v", listed.Switches)
-	}
-
-	body, status, _ = doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/agent-switches/switch-1/handoff", `{
-		"sourceGenerationId":"generation-7",
-		"handoff":{"summary":"tests pass","nextSteps":["review diff"]}
-	}`)
-	if status != http.StatusOK {
-		t.Fatalf("submit handoff = %d, want 200; body=%s", status, body)
-	}
-	assertAgentSwitchResponseRedacted(t, body)
-	if svc.handoffSource != "generation-7" {
-		t.Fatalf("source generation = %q", svc.handoffSource)
-	}
-	var handoff map[string]any
-	if err := json.Unmarshal(svc.handoff, &handoff); err != nil {
-		t.Fatalf("decode recorded handoff: %v", err)
-	}
-	if handoff["summary"] != "tests pass" {
-		t.Fatalf("recorded handoff = %#v", handoff)
-	}
-	recovery := svc.agentSwitches["switch-1"]
-	recovery.State = domain.AgentSwitchSourceStopped
-	recovery.ErrorCode = domain.AgentSwitchErrorSourceRestoreUnconfirmed
-	svc.agentSwitches[recovery.ID] = recovery
-	body, status, _ = doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/agent-switches/switch-1/recover", "")
-	if status != http.StatusAccepted {
-		t.Fatalf("recover switch = %d, want 202; body=%s", status, body)
-	}
-	assertAgentSwitchResponseRedacted(t, body)
-	if svc.recoveredSwitch != "switch-1" {
-		t.Fatalf("recovered switch = %q, want switch-1", svc.recoveredSwitch)
-	}
-
-}
-
-func TestSessionsAPIActiveSwitchProjectionRedactsPrivateFacts(t *testing.T) {
-	svc := newFakeSessionService()
-	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
-	targetRef := domain.AgentNativeSessionID("native-target")
-	session := svc.sessions["ao-1"]
-	session.ActiveAgentSwitch = &domain.AgentSwitch{
-		ID: "switch-active", SessionID: "ao-1", IdempotencyKey: "private-key",
-		RequestFingerprint: "v1:private-fingerprint", FromHarness: domain.HarnessClaudeCode,
-		TargetHarness: domain.HarnessCodex, TargetNativeSessionRef: &targetRef,
-		TargetStartMode: domain.AgentSwitchTargetStartFresh, State: domain.AgentSwitchStartingTarget,
-		AgentHandoffStatus: domain.AgentHandoffReceived, SemanticHandoffIncluded: true,
-		SourceTranscriptStatus: domain.AgentSwitchSourceTranscriptAvailable,
-		AgentHandoffPath:       "/private/agent-handoff.json", AgentHandoffHash: "private-agent-hash",
-		FinalHandoffPath: "/private/final-handoff.json", FinalHandoffHash: "private-final-hash",
-		SourceGenerationID: "private-source-generation", TargetGenerationID: "private-target-generation",
-		TargetRuntimeHandleID: "private-runtime-handle", TargetAcknowledgedAt: &now,
-		RequestedAt: now, UpdatedAt: now,
-	}
-	svc.sessions["ao-1"] = session
-	srv := newSessionTestServer(t, svc)
-
-	body, status, _ := doRequest(t, srv, http.MethodGet, "/api/v1/sessions/ao-1", "")
-	if status != http.StatusOK {
-		t.Fatalf("get session = %d, want 200; body=%s", status, body)
-	}
-	assertAgentSwitchResponseRedacted(t, body)
-	var response struct {
-		Session struct {
-			ActiveAgentSwitch *controllers.AgentSwitchView `json:"activeAgentSwitch"`
-		} `json:"session"`
-	}
-	mustJSON(t, body, &response)
-	if response.Session.ActiveAgentSwitch == nil || response.Session.ActiveAgentSwitch.ID != "switch-active" || response.Session.ActiveAgentSwitch.State != domain.AgentSwitchStartingTarget {
-		t.Fatalf("active switch projection = %+v", response.Session.ActiveAgentSwitch)
-	}
-}
-
-func assertAgentSwitchResponseRedacted(t *testing.T, body []byte) {
-	t.Helper()
-	privateFields := []string{
-		"idempotencyKey",
-		"requestFingerprint",
-		"targetNativeSessionRef",
-		"agentHandoffPath",
-		"agentHandoffHash",
-		"finalHandoffPath",
-		"finalHandoffHash",
-		"sourceGenerationId",
-		"targetGenerationId",
-		"targetRuntimeHandleId",
-		"targetAcknowledgedAt",
-	}
-	for _, field := range privateFields {
-		if strings.Contains(string(body), `"`+field+`"`) {
-			t.Errorf("public agent-switch response leaked %s: %s", field, body)
-		}
-	}
-}
-
-func TestSessionsAPI_SubmitAgentHandoffPreservesRawObject(t *testing.T) {
-	svc := newFakeSessionService()
-	svc.agentSwitches["switch-1"] = domain.AgentSwitch{ID: "switch-1", SessionID: "ao-1"}
-	srv := newSessionTestServer(t, svc)
-
-	const handoff = `{"schemaVersion":1,"goal":"first","goal":"second","progressSummary":"ready"}`
-	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/agent-switches/switch-1/handoff", `{
-		"sourceGenerationId":"generation-7",
-		"handoff":`+handoff+`
-	}`)
-	if status != http.StatusOK {
-		t.Fatalf("submit handoff = %d, want 200; body=%s", status, body)
-	}
-	if got := string(svc.handoff); got != handoff {
-		t.Fatalf("handoff raw JSON = %s, want exact input %s", got, handoff)
-	}
-	assertAgentSwitchResponseRedacted(t, body)
-}
-
-func TestSessionsAPI_AgentSwitchValidationAndErrors(t *testing.T) {
-	tests := []struct {
-		name     string
-		method   string
-		path     string
-		body     string
-		wantCode string
-	}{
-		{name: "target required", method: http.MethodPost, path: "/api/v1/sessions/ao-1/switch-agent", body: `{}`, wantCode: "TARGET_HARNESS_REQUIRED"},
-		{name: "retired note rejected", method: http.MethodPost, path: "/api/v1/sessions/ao-1/switch-agent", body: `{"targetHarness":"codex","note":"old context"}`, wantCode: "INVALID_JSON"},
-		{name: "model bounded", method: http.MethodPost, path: "/api/v1/sessions/ao-1/switch-agent", body: `{"targetHarness":"codex","model":"` + strings.Repeat("x", 257) + `"}`, wantCode: "MODEL_TOO_LONG"},
-		{name: "source generation required", method: http.MethodPost, path: "/api/v1/sessions/ao-1/agent-switches/switch-1/handoff", body: `{"handoff":{}}`, wantCode: "SOURCE_GENERATION_REQUIRED"},
-		{name: "handoff required", method: http.MethodPost, path: "/api/v1/sessions/ao-1/agent-switches/switch-1/handoff", body: `{"sourceGenerationId":"generation-7"}`, wantCode: "HANDOFF_REQUIRED"},
-		{name: "handoff bounded", method: http.MethodPost, path: "/api/v1/sessions/ao-1/agent-switches/switch-1/handoff", body: `{"sourceGenerationId":"generation-7","handoff":{"summary":"` + strings.Repeat("x", 65537) + `"}}`, wantCode: "HANDOFF_TOO_LARGE"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			svc := newFakeSessionService()
-			svc.agentSwitches["switch-1"] = domain.AgentSwitch{ID: "switch-1", SessionID: "ao-1"}
-			srv := newSessionTestServer(t, svc)
-			body, status, _ := doRequest(t, srv, tc.method, tc.path, tc.body)
-			if status != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400; body=%s", status, body)
-			}
-			var apiErr struct {
-				Code string `json:"code"`
-			}
-			mustJSON(t, body, &apiErr)
-			if apiErr.Code != tc.wantCode {
-				t.Fatalf("code = %q, want %q; body=%s", apiErr.Code, tc.wantCode, body)
-			}
-		})
-	}
-
-	svc := newFakeSessionService()
-	svc.switchErr = apierr.Conflict("AGENT_SWITCH_IN_PROGRESS", "switch in progress", nil)
-	srv := newSessionTestServer(t, svc)
-	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/switch-agent", `{"targetHarness":"codex"}`)
-	if status != http.StatusConflict || !strings.Contains(string(body), "AGENT_SWITCH_IN_PROGRESS") {
-		t.Fatalf("typed conflict = %d body=%s", status, body)
-	}
-}
-
 func (f *fakeSessionService) InvalidateWorkspaceCache(_ domain.SessionID) {}
 
 func newSessionTestServer(t *testing.T, svc *fakeSessionService) *httptest.Server {
@@ -1191,7 +928,7 @@ func newSessionTestServerWithPreview(
 		deps.PreviewServer = managed
 		deps.SessionCapabilities = allowSessionCapability{}
 	}
-	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, deps, httpd.ControlDeps{}))
+	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{AllowedOrigins: []string{"app://renderer", "http://localhost:5173"}}, log, nil, deps, httpd.ControlDeps{}))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -1339,6 +1076,61 @@ func TestSessionsAPI_StartInterfaceTransitionDefaultsOmittedHistoryPolicyToStric
 	mustJSON(t, body, &response)
 	if response.Transition.HistoryPolicy != domain.SessionInterfaceTransitionHistoryStrict {
 		t.Fatalf("response history policy = %q, want strict", response.Transition.HistoryPolicy)
+	}
+}
+
+// A phone polls only live workers and pages the archive when it is opened. The
+// paging query reaches the service intact, and the page's cursor and the
+// archive's size are on the wire only when there is something to report.
+func TestSessionsAPI_ListPagesTheArchiveAndSizesIt(t *testing.T) {
+	svc := newFakeSessionService()
+	svc.listPage = &sessionsvc.ListPage{
+		Sessions:   []domain.Session{svc.sessions["ao-1"]},
+		NextCursor: "next-page",
+		Archived:   &sessionsvc.ArchiveSummary{Total: 3, ByProject: map[domain.ProjectID]int{"ao": 2, "": 1}},
+	}
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/sessions?active=true&kind=worker&limit=50&cursor=abc", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET sessions = %d, want 200; body=%s", status, body)
+	}
+	if f := svc.lastListFilter; f.Active == nil || !*f.Active || f.Kind != domain.KindWorker || f.Limit != 50 || f.Cursor != "abc" {
+		t.Fatalf("filter = %+v, want active worker page of 50 after abc", f)
+	}
+	var page struct {
+		Sessions   []sessionBody `json:"sessions"`
+		NextCursor string        `json:"nextCursor"`
+		Archived   *struct {
+			Total     int            `json:"total"`
+			ByProject map[string]int `json:"byProject"`
+		} `json:"archived"`
+	}
+	mustJSON(t, body, &page)
+	if len(page.Sessions) != 1 || page.NextCursor != "next-page" {
+		t.Fatalf("page = %d sessions, cursor %q", len(page.Sessions), page.NextCursor)
+	}
+	if page.Archived == nil || page.Archived.Total != 3 || page.Archived.ByProject["ao"] != 2 || page.Archived.ByProject[""] != 1 {
+		t.Fatalf("archived = %+v, want 3 (ao 2, standalone 1)", page.Archived)
+	}
+
+	svc.listPage = nil
+	body, status, _ = doRequest(t, srv, "GET", "/api/v1/sessions", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET sessions = %d, want 200; body=%s", status, body)
+	}
+	if strings.Contains(string(body), "nextCursor") || strings.Contains(string(body), "\"archived\"") {
+		t.Fatalf("unpaged list carries paging fields: %s", body)
+	}
+}
+
+func TestSessionsAPI_ListRejectsBadPagingQuery(t *testing.T) {
+	srv := newSessionTestServer(t, newFakeSessionService())
+	for _, query := range []string{"kind=reviewer", "limit=0", "limit=201", "limit=ten", "cursor=abc"} {
+		body, status, _ := doRequest(t, srv, "GET", "/api/v1/sessions?"+query, "")
+		if status != http.StatusBadRequest || !strings.Contains(string(body), "INVALID_QUERY") {
+			t.Fatalf("GET sessions?%s = %d %s, want 400 INVALID_QUERY", query, status, body)
+		}
 	}
 }
 
@@ -3755,7 +3547,7 @@ func TestSessionsAPI_ManagedPreviewAppProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", "Bearer host-password")
-	request.Header.Set("Origin", "http://ao-preview-client.localhost:4321")
+	request.Header.Set("Origin", "app://renderer")
 	request.Header.Set("X-AO-Preview-App-Authorization", "Basic app-token")
 	request.Header.Set("X-AO-Preview-App-Origin", "http://ao-preview-client.localhost:4321")
 	response, err = http.DefaultClient.Do(request)
@@ -3781,7 +3573,7 @@ func TestSessionsAPI_ManagedPreviewAppProxy(t *testing.T) {
 	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(srv.URL, "http")+"/api/v1/sessions/ao-1/preview/app/ws", &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"Authorization":                  []string{"Bearer host-password"},
-			"Origin":                         []string{"http://ao-preview-client.localhost:4321"},
+			"Origin":                         []string{"app://renderer"},
 			"X-Ao-Preview-App-Authorization": []string{"Basic ws-token"},
 			"X-Ao-Preview-App-Origin":        []string{"http://ao-preview-client.localhost:4321"},
 		},
@@ -5509,5 +5301,33 @@ func TestSessionsAPI_SourceSelectorCannotFallBackToLiveFiles(t *testing.T) {
 				t.Fatalf("source selector fell back to the worktree: %d %s input=%+v", status, body, svc.workspaceSnapshotInput)
 			}
 		})
+	}
+}
+
+func TestSessionsAPI_LegacyPreviewDocumentsHaveNoAPIOrigin(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"index.html", "report.md", "image.svg", "asset.js"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("<script>window.preview=true</script>"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := newFakeSessionService()
+	sess := svc.sessions["ao-1"]
+	sess.Metadata.WorkspacePath = root
+	svc.sessions["ao-1"] = sess
+	srv := newSessionTestServer(t, svc)
+	previewURL, err := previewutil.FileURL(srv.URL, "ao-1", "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"index.html", "report.md", "image.svg", "asset.js"} {
+		_, status, headers := doRequest(t, srv, http.MethodGet, "/api/v1/sessions/ao-1/preview/files/"+name, "")
+		if status != 200 || headers.Get("Content-Security-Policy") != "sandbox allow-scripts allow-forms" || headers.Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("legacy %s: status=%d headers=%v", name, status, headers)
+		}
+		_, status, headers = doPreviewOriginRequest(t, srv, previewURL, "/"+name)
+		if status != 200 || headers.Get("Content-Security-Policy") != "" {
+			t.Fatalf("isolated %s: status=%d headers=%v", name, status, headers)
+		}
 	}
 }
