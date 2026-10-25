@@ -291,8 +291,10 @@ interface uses a fresh anonymous identifier until the next restart. Data already
 sent to PostHog is not deleted.
 
 The **Share error events** control on the same page covers error diagnostics
-only: the daemon's Sentry capture of 5xx errors and panics. The
-daemon tags these error events with the same `install_id` when the installation
+only: the daemon's Sentry capture of 5xx errors and panics. Sentry receives
+fixed HTTP failure or panic labels and safe error codes instead of raw error
+messages. It keeps stack function and line information, but removes stack paths,
+request data, and panic text. The daemon tags these error events with the same `install_id` when the installation
 identifier is available. If it cannot be read, consented error reporting
 continues without that tag. The tag does not include email or local paths. The
 environment-variable controls below also govern the desktop/daemon
