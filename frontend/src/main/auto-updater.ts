@@ -2711,6 +2711,7 @@ export function setUpdateRestartFailureHandler(handler: () => void): void { rest
 export function isUpdateRestartRequested(): boolean { return updateRestartRequested; }
 
 export function clearUpdateRestartRequest(): void {
+  if (!updateRestartRequested) return;
   updateRestartRequested = false;
   macRestartPreparation = undefined;
 }
